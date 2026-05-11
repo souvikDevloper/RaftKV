@@ -1,164 +1,182 @@
-# RaftKV — Distributed Key-Value Store
+# RaftKV
 
-RaftKV is a Go implementation of a replicated key-value store built around a custom Raft consensus engine. It is intentionally small enough to explain in an interview, but complete enough to demonstrate leader election, log replication, quorum commits, durable storage, snapshots, and fault-injection testing.
+**RaftKV** is a fault-tolerant replicated key-value store built in Go with a custom Raft consensus engine. It supports leader election, replicated logs, quorum-based writes, durable state, snapshotting, and local fault-injection testing across a 5-node cluster.
 
-## Why this project matters
+The project is designed as a compact distributed systems implementation that demonstrates the core mechanics behind replicated storage and coordination services.
 
-This repo targets the same core systems ideas behind replicated metadata stores, distributed locks, and coordination layers:
+---
 
-- leader election
-- majority quorum replication
-- durable write-ahead log
-- ordered state-machine application
-- snapshot-based log compaction
-- failover after leader crash
-- stale-read detection through a Jepsen-style history checker
+## Highlights
 
-## Tech stack
+- Custom Raft consensus implementation in Go
+- 5-node replicated key-value cluster
+- Leader election with randomized election timeouts
+- Log replication using `AppendEntries`
+- Majority-quorum commit flow
+- Leader-routed reads and writes
+- Persistent Raft metadata and replicated log storage
+- Snapshot-based log compaction
+- Fault-injection scripts for leader failure
+- History checker for stale-read detection
+- Docker Compose cluster harness
+- GitHub Actions CI workflow
 
-- **Go** for the server and CLI
-- **gRPC** peer/client transport using an explicit JSON codec
-- **BoltDB / bbolt** for durable Raft metadata, WAL entries, and snapshots
-- **Docker Compose** for a 5-node cluster
-- **GitHub Actions** for tests and a smoke fault suite
-- **Python** for the history checker
+---
 
 ## Architecture
 
 ```text
-client CLI
-   |
-   | Put/Get/Status over gRPC
-   v
-leader node
-   |
-   | AppendEntries / RequestVote / InstallSnapshot over gRPC
-   v
-followers
-   |
-   v
-BoltDB WAL + snapshot + in-memory KV state machine
-```
+                +-------------+
+                |   Client    |
+                +------+------+
+                       |
+                       | Put / Get / Status
+                       v
+                +-------------+
+                |   Leader    |
+                +------+------+
+                       |
+        +--------------+--------------+
+        |              |              |
+        v              v              v
+   +---------+    +---------+    +---------+
+   |Follower |    |Follower |    |Follower |
+   +----+----+    +----+----+    +----+----+
+        |              |              |
+        v              v              v
+  Durable Log    Durable Log    Durable Log
+  Snapshot KV    Snapshot KV    Snapshot KV
 
-## Features
+Each write is accepted by the current leader, appended to the replicated log, sent to followers, and committed only after majority acknowledgement. Committed entries are then applied to the key-value state machine in log order.
 
-### Raft consensus
-
-- RequestVote RPC
-- AppendEntries RPC
-- InstallSnapshot RPC
-- randomized election timeout
-- leader heartbeats
-- term and votedFor persistence
-- leader-only reads/writes
-- majority quorum commits
-- follower log conflict repair
-
-### Storage
-
-- durable metadata: `currentTerm`, `votedFor`
-- durable replicated log entries
-- snapshot persistence
-- log compaction after configurable commit threshold
-
-### Fault testing
-
-- 5-node local cluster
-- leader crash script
-- chaos script that writes before/after leader death
-- history checker that detects stale reads after committed writes
-- CI smoke test for fault scenario
-
-## Run locally
-
-```bash
+Repository Structure
+cmd/raftkv/          CLI and server entry point
+internal/raft/      Raft consensus implementation
+internal/rpc/       RPC transport and request handling
+internal/store/     durable metadata, log, and snapshot storage
+scripts/            cluster startup, demo, chaos, and benchmark scripts
+tools/              history checker utilities
+docs/               design and benchmark notes
+.github/workflows/  CI configuration
+Tech Stack
+Area	Technology
+Language	Go
+Consensus	Custom Raft implementation
+Storage	Embedded durable log and snapshot store
+Cluster Harness	Bash scripts, Docker Compose
+Validation	Go tests, fault scripts, history checker
+CI/CD	GitHub Actions
+Getting Started
+1. Run tests
+go test ./...
+2. Start a 5-node cluster
 ./scripts/start_cluster.sh
-./scripts/demo.sh  # start_cluster waits until a leader is elected
-```
 
-Stop the cluster:
+The script builds the server binary, starts five local nodes, waits for leader election, and prints cluster status.
 
-```bash
-./scripts/stop_cluster.sh
-```
-
-## Manual commands
-
-```bash
-NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
-
-./run/raftkv status --nodes "$NODES"
-./run/raftkv put --nodes "$NODES" --key user:1 --value active
-./run/raftkv get --nodes "$NODES" --key user:1
-```
-
-## Fault injection demo
-
-```bash
-./scripts/start_cluster.sh
-sleep 2
-./scripts/kill_leader.sh
-sleep 1
+3. Run the demo
 ./scripts/demo.sh
+
+The demo performs:
+
+cluster status check
+write operation
+read operation
+multiple writes to trigger snapshotting
+final replicated state check
+4. Stop the cluster
 ./scripts/stop_cluster.sh
-```
-
-## Jepsen-style history check
-
-```bash
-./scripts/chaos.sh
-```
-
-For a longer local suite:
-
-```bash
-RUNS=50 ./scripts/run_fault_suite.sh
-```
-
-## Docker Compose
-
-```bash
-docker compose up --build
-```
-
-In another terminal:
-
-```bash
-go build -o run/raftkv ./cmd/raftkv
+CLI Usage
 NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
+Cluster status
+./run/raftkv status --nodes "$NODES"
+Write a key
+./run/raftkv put --nodes "$NODES" --key user:1 --value active
+Read a key
+./run/raftkv get --nodes "$NODES" --key user:1
+Fault Injection
+
+RaftKV includes a local chaos workflow that starts a 5-node cluster, writes data, kills the active leader, continues operations through the remaining quorum, and validates the recorded history.
+
+./scripts/chaos.sh
+
+Sample output:
+
+killing leader n5
+PASS: checked 9 events; no stale reads after successful writes
+cluster stopped
+
+The history checker verifies that successful reads do not observe stale values after successful writes in the recorded execution order.
+
+Snapshotting
+
+RaftKV supports snapshot-based log compaction after a configurable commit threshold. Once the threshold is reached, the state machine snapshot is persisted and old log entries are compacted.
+
+Example demo output:
+
+snapshot_index: 30
+
+This prevents unbounded replicated log growth during long-running workloads.
+
+Benchmarking
+
+Run a local write benchmark:
+
+./scripts/start_cluster.sh
+
+NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
+./run/raftkv bench --nodes "$NODES" --n 50
+
+./scripts/stop_cluster.sh
+
+Sample WSL result:
+
+writes=50 throughput=34.5_ops/sec p50=29.875ms p99=51.356ms
+
+Performance depends on hardware, OS, filesystem, cluster mode, and background workload.
+
+Docker Compose
+
+Start the cluster with Docker Compose:
+
+docker compose up --build
+
+Then use the CLI from another terminal:
+
+go build -o run/raftkv ./cmd/raftkv
+
+NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
+
 ./run/raftkv put --nodes "$NODES" --key x --value 42
 ./run/raftkv get --nodes "$NODES" --key x
-```
+Reliability Checks
 
-## Benchmark
+RaftKV validates correctness through:
 
-```bash
-./scripts/start_cluster.sh
-sleep 2
-NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
-./run/raftkv bench --nodes "$NODES" --n 1000
-./scripts/stop_cluster.sh
-```
+unit tests for consensus and storage components
+5-node local cluster startup checks
+leader election verification
+quorum write validation
+leader crash workflow
+stale-read history checking
+CI smoke test for fault scenarios
+Current Scope
 
-Benchmark numbers depend heavily on laptop, OS, and background processes. Keep the output in `docs/benchmark.md` if you want to quote it in your resume.
+RaftKV focuses on core consensus and replication mechanics. It does not yet include:
 
-## Interview talking points
+dynamic membership changes
+production-grade network partition simulation
+lease reads or ReadIndex optimization
+advanced compaction tuning
+full formal linearizability verification
+production deployment hardening
+Roadmap
+Add proxy-based network partition testing
+Add stronger linearizability checker
+Add read-index based linearizable reads
+Improve benchmark throughput through batching
+Add metrics endpoint for cluster health
+Add web dashboard for node status and log replication
+License
 
-1. **Why Raft instead of primary-backup?** Raft provides a clear replicated-log model, term-based leader authority, and quorum-based safety.
-2. **How are writes committed?** The leader appends a log entry locally, replicates it to followers, and advances commitIndex after a majority acknowledges.
-3. **Why leader-only reads?** It keeps the demo simple and avoids stale follower reads without implementing lease reads or ReadIndex.
-4. **What does BoltDB store?** Current term, votedFor, log entries, snapshot index/term, and the compacted KV snapshot.
-5. **What does the history checker prove?** It checks that successful reads do not go backward after successful writes in recorded order.
-
-## Current limitation
-
-This is a learning/interview project, not etcd. The most important missing production features are membership changes, real network partitions through a proxy, disk fsync tuning, linearizable read-index optimization, and full Elle/Knossos-style verification.
-
-## Offline dependency note
-
-This ZIP is designed to compile in offline environments. It includes small local compatibility layers under `third_party/` and uses `replace` directives in `go.mod` for:
-
-- `google.golang.org/grpc`
-- `go.etcd.io/bbolt`
-
-That keeps the project runnable without internet access. For a production-grade GitHub version, replace these local shims with the official packages and generated protobuf definitions.
+MIT License
