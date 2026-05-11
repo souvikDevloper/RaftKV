@@ -46,55 +46,76 @@ The project is designed as a compact distributed systems implementation that dem
         v              v              v
   Durable Log    Durable Log    Durable Log
   Snapshot KV    Snapshot KV    Snapshot KV
+```
 
 Each write is accepted by the current leader, appended to the replicated log, sent to followers, and committed only after majority acknowledgement. Committed entries are then applied to the key-value state machine in log order.
 
-Repository Structure
-cmd/raftkv/          CLI and server entry point
-internal/raft/      Raft consensus implementation
-internal/rpc/       RPC transport and request handling
-internal/store/     durable metadata, log, and snapshot storage
-scripts/            cluster startup, demo, chaos, and benchmark scripts
-tools/              history checker utilities
-docs/               design and benchmark notes
-.github/workflows/  CI configuration
-Tech Stack
-Area	Technology
-Language	Go
-Consensus	Custom Raft implementation
-Storage	Embedded durable log and snapshot store
-Cluster Harness	Bash scripts, Docker Compose
-Validation	Go tests, fault scripts, history checker
-CI/CD	GitHub Actions
-Getting Started
-1. Run tests
+---
+
+## Getting Started
+
+### Run tests
+
+```bash
 go test ./...
-2. Start a 5-node cluster
+```
+
+### Start a 5-node cluster
+
+```bash
 ./scripts/start_cluster.sh
+```
 
 The script builds the server binary, starts five local nodes, waits for leader election, and prints cluster status.
 
-3. Run the demo
+### Run the demo
+
+```bash
 ./scripts/demo.sh
+```
 
 The demo performs:
 
-cluster status check
-write operation
-read operation
-multiple writes to trigger snapshotting
-final replicated state check
-4. Stop the cluster
+- cluster status check
+- write operation
+- read operation
+- multiple writes to trigger snapshotting
+- final replicated state check
+
+### Stop the cluster
+
+```bash
 ./scripts/stop_cluster.sh
-CLI Usage
+```
+
+---
+
+## CLI Usage
+
+```bash
 NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
-Cluster status
+```
+
+### Cluster status
+
+```bash
 ./run/raftkv status --nodes "$NODES"
-Write a key
+```
+
+### Write a key
+
+```bash
 ./run/raftkv put --nodes "$NODES" --key user:1 --value active
-Read a key
+```
+
+### Read a key
+
+```bash
 ./run/raftkv get --nodes "$NODES" --key user:1
-Fault Injection
+```
+
+---
+## Fault Injection
 
 RaftKV includes a local chaos workflow that starts a 5-node cluster, writes data, kills the active leader, continues operations through the remaining quorum, and validates the recorded history.
 
