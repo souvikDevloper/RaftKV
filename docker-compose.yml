@@ -1,0 +1,32 @@
+services:
+  n1:
+    build: .
+    command: ["server", "--id", "n1", "--listen", "0.0.0.0:7001", "--peers", "n2=n2:7002,n3=n3:7003,n4=n4:7004,n5=n5:7005", "--data", "/data", "--snapshot-every", "10"]
+    ports: ["7001:7001"]
+    volumes: ["n1:/data"]
+  n2:
+    build: .
+    command: ["server", "--id", "n2", "--listen", "0.0.0.0:7002", "--peers", "n1=n1:7001,n3=n3:7003,n4=n4:7004,n5=n5:7005", "--data", "/data", "--snapshot-every", "10"]
+    ports: ["7002:7002"]
+    volumes: ["n2:/data"]
+  n3:
+    build: .
+    command: ["server", "--id", "n3", "--listen", "0.0.0.0:7003", "--peers", "n1=n1:7001,n2=n2:7002,n4=n4:7004,n5=n5:7005", "--data", "/data", "--snapshot-every", "10"]
+    ports: ["7003:7003"]
+    volumes: ["n3:/data"]
+  n4:
+    build: .
+    command: ["server", "--id", "n4", "--listen", "0.0.0.0:7004", "--peers", "n1=n1:7001,n2=n2:7002,n3=n3:7003,n5=n5:7005", "--data", "/data", "--snapshot-every", "10"]
+    ports: ["7004:7004"]
+    volumes: ["n4:/data"]
+  n5:
+    build: .
+    command: ["server", "--id", "n5", "--listen", "0.0.0.0:7005", "--peers", "n1=n1:7001,n2=n2:7002,n3=n3:7003,n4=n4:7004", "--data", "/data", "--snapshot-every", "10"]
+    ports: ["7005:7005"]
+    volumes: ["n5:/data"]
+volumes:
+  n1: {}
+  n2: {}
+  n3: {}
+  n4: {}
+  n5: {}
