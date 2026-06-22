@@ -6,11 +6,16 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/souvikDevloper/RaftKV/internal/metrics"
 	"github.com/souvikDevloper/RaftKV/internal/raft"
+	"github.com/souvikDevloper/RaftKV/internal/resp"
 	"github.com/souvikDevloper/RaftKV/internal/rpc"
 )
 
@@ -28,8 +33,8 @@ func main() {
 		runGet(os.Args[2:])
 	case "status":
 		runStatus(os.Args[2:])
-	case "bench":
-		runBench(os.Args[2:])
+	case "redis-proxy":
+		runRedisProxy(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -42,7 +47,7 @@ func usage() {
   raftkv put --nodes 127.0.0.1:7001,127.0.0.1:7002 --key x --value 42
   raftkv get --nodes 127.0.0.1:7001,127.0.0.1:7002 --key x
   raftkv status --nodes 127.0.0.1:7001,127.0.0.1:7002
-  raftkv bench --nodes 127.0.0.1:7001,127.0.0.1:7002 --n 1000`)
+  raftkv redis-proxy --listen 127.0.0.1:6380 --nodes 127.0.0.1:7001,127.0.0.1:7002`)
 }
 
 func runServer(args []string) {
@@ -51,18 +56,45 @@ func runServer(args []string) {
 	listen := fs.String("listen", "127.0.0.1:7001", "gRPC listen address")
 	peersRaw := fs.String("peers", "", "comma-separated id=addr peers")
 	data := fs.String("data", "data/n1", "data directory")
-	snapEvery := fs.Int64("snapshot-every", 25, "entries between snapshots")
+	snapEvery := fs.Int64("snapshot-every", 10000, "entries between snapshots")
+	metricsListen := fs.String("metrics-listen", "127.0.0.1:9101", "Prometheus and HdrHistogram HTTP address")
+	groupMax := fs.Int("group-commit-max", 256, "maximum proposals per durable WAL transaction")
+	groupWindow := fs.Duration("group-commit-window", time.Millisecond, "maximum proposal batching delay")
+	respListen := fs.String("resp-listen", "", "optional direct RESP endpoint for YCSB")
 	fs.Parse(args)
 	peers := parsePeers(*peersRaw)
-	n, err := raft.New(raft.Config{ID: *id, Listen: *listen, Peers: peers, DataDir: *data, SnapshotEvery: *snapEvery})
+	registry := metrics.New()
+	n, err := raft.New(raft.Config{ID: *id, Listen: *listen, Peers: peers, DataDir: *data, SnapshotEvery: *snapEvery,
+		GroupCommitMax: *groupMax, GroupCommitWindow: *groupWindow, Metrics: registry})
 	if err != nil {
 		log.Fatal(err)
 	}
 	if err := n.Start(); err != nil {
 		log.Fatal(err)
 	}
+	metricsServer := &http.Server{Addr: *metricsListen, Handler: registry.Handler(), ReadHeaderTimeout: 2 * time.Second}
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("metrics server stopped: %v", err)
+		}
+	}()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if *respListen != "" {
+		go func() {
+			log.Printf("direct YCSB RESP endpoint listening on %s", *respListen)
+			if err := resp.NewServer(*respListen, n).Serve(ctx); err != nil {
+				log.Printf("RESP endpoint stopped: %v", err)
+				stop()
+			}
+		}()
+	}
 	log.Printf("node %s listening on %s peers=%v", *id, *listen, peers)
-	select {}
+	<-ctx.Done()
+	n.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = metricsServer.Shutdown(ctx)
 }
 
 func parsePeers(raw string) map[string]string {
@@ -145,26 +177,25 @@ func runStatus(args []string) {
 		fmt.Println(string(b))
 	}
 }
-func runBench(args []string) {
-	fs := flag.NewFlagSet("bench", flag.ExitOnError)
-	nodes := fs.String("nodes", "127.0.0.1:7001", "comma-separated node addresses")
-	n := fs.Int("n", 1000, "number of writes")
+func runRedisProxy(args []string) {
+	fs := flag.NewFlagSet("redis-proxy", flag.ExitOnError)
+	listen := fs.String("listen", "127.0.0.1:6380", "RESP listen address")
+	nodes := fs.String("nodes", "127.0.0.1:7001", "comma-separated RaftKV gRPC addresses")
 	fs.Parse(args)
-	lat := make([]time.Duration, 0, *n)
-	start := time.Now()
-	for i := 0; i < *n; i++ {
-		t0 := time.Now()
-		_, err := putToAny(nodeList(*nodes), fmt.Sprintf("bench-%d", i), fmt.Sprintf("v-%d", i))
-		if err != nil {
-			log.Fatal(err)
-		}
-		lat = append(lat, time.Since(t0))
+	router := resp.NewRouter(nodeList(*nodes))
+	defer router.Close()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	log.Printf("YCSB Redis compatibility proxy listening on %s", *listen)
+	if err := resp.NewServer(*listen, router).Serve(ctx); err != nil {
+		log.Fatal(err)
 	}
-	total := time.Since(start)
-	sortDur(lat)
-	p50 := lat[len(lat)/2]
-	p99 := lat[int(float64(len(lat))*0.99)-1]
-	fmt.Printf("writes=%d throughput=%.1f_ops_sec p50=%s p99=%s\n", *n, float64(*n)/total.Seconds(), p50, p99)
+}
+
+func waitForSignal() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	<-ch
 }
 func putToAny(nodes []string, key, val string) (*rpc.PutResponse, error) {
 	seen := map[string]bool{}
@@ -227,15 +258,4 @@ func leaderToAddr(nodes []string, leader string) string { // scripts use n1->700
 		}
 	}
 	return ""
-}
-func sortDur(xs []time.Duration) {
-	for i := 1; i < len(xs); i++ {
-		x := xs[i]
-		j := i - 1
-		for j >= 0 && xs[j] > x {
-			xs[j+1] = xs[j]
-			j--
-		}
-		xs[j+1] = x
-	}
 }

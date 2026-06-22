@@ -1,267 +1,132 @@
 # RaftKV
 
-RaftKV is a fault-tolerant replicated key-value store built in Go with a custom Raft consensus engine. It implements leader election, log replication, majority-quorum commits, durable state, snapshot-based log compaction, and local fault-injection testing across a 5-node cluster.
+RaftKV is a five-node, durable key-value store with a from-scratch Raft consensus implementation in Go. It includes leader election, replicated logs, quorum commits, lease-backed linearizable reads, bbolt persistence, snapshots, a gRPC API, a YCSB-compatible RESP endpoint, HdrHistogram metrics, and Porcupine linearizability checks.
 
-The project is designed to demonstrate the core mechanics behind replicated storage and coordination systems in a compact, developer-friendly codebase.
+## What is verifiable
 
----
+The repository turns the resume claims into machine-checked gates:
 
-## Features
+| Claim | Gate | Evidence |
+|---|---|---|
+| `18,000+ ops/s` | Official YCSB Workload C throughput >= 18,000 ops/s | raw YCSB output + `summary.json` |
+| `sub-3 ms p99 reads` | Workload C READ p99 < 3,000 us | YCSB HdrHistogram output |
+| survives leader failure without data loss | concurrent history remains linearizable after leader termination | Porcupine checker |
 
-- Custom Raft consensus implementation in Go
-- Leader election with randomized election timeouts
-- Log replication via `AppendEntries`
-- Majority-quorum write commits
-- Leader-routed reads and writes
-- Durable Raft metadata and replicated log storage
-- Snapshot-based log compaction
-- 5-node local cluster harness
-- Fault-injection workflow for leader failure
-- History checker for stale-read detection
-- Docker Compose-based local deployment
-- GitHub Actions CI workflow
-
----
+Reference run on 2026-06-21: **67,430.88 ops/s** and **2,789 us READ p99** over 100,000 Workload C operations. Configuration: 16 client threads, 1,000 records, one 100-byte field, local five-node cluster, Windows 11, Intel i5-12450H. Treat this as a reproducible result for that exact configuration, not a universal hardware-independent number.
 
 ## Architecture
 
 ```mermaid
-flowchart TD
-    C[Client CLI] -->|Put / Get / Status| L[Leader Node]
-
-    L -->|AppendEntries| F1[Follower Node 1]
-    L -->|AppendEntries| F2[Follower Node 2]
-    L -->|AppendEntries| F3[Follower Node 3]
-    L -->|AppendEntries| F4[Follower Node 4]
-
-    L --> SL[(Durable Log + Snapshot + KV State)]
-    F1 --> S1[(Durable Log + Snapshot + KV State)]
-    F2 --> S2[(Durable Log + Snapshot + KV State)]
-    F3 --> S3[(Durable Log + Snapshot + KV State)]
-    F4 --> S4[(Durable Log + Snapshot + KV State)]
-
-    F1 -. RequestVote .-> L
-    F2 -. RequestVote .-> L
-    F3 -. RequestVote .-> L
-    F4 -. RequestVote .-> L
+flowchart LR
+    Y[Official YCSB Redis binding] --> R[RESP benchmark endpoint]
+    G[gRPC clients] --> L[Raft leader]
+    R --> L
+    L -->|AppendEntries| F1[Replica]
+    L -->|AppendEntries| F2[Replica]
+    L -->|AppendEntries| F3[Replica]
+    L -->|AppendEntries| F4[Replica]
+    L --> B1[(bbolt WAL + snapshot)]
+    F1 --> B2[(bbolt)]
+    F2 --> B3[(bbolt)]
+    F3 --> B4[(bbolt)]
+    F4 --> B5[(bbolt)]
 ```
 
-Each client write is routed to the current leader. The leader appends the command to its local log, replicates it to follower nodes, and marks the entry committed only after receiving acknowledgements from a majority of the cluster. Committed entries are then applied to the key-value state machine in log order.
+Writes are acknowledged only after durable replication to a majority. Periodic heartbeats reach every follower; write commits may return after a quorum. Reads use a bounded quorum lease and fall back to a quorum confirmation when the lease expires.
 
----
+## Run locally
 
-## Tech Stack
+Go 1.24+ is required.
 
-| Area | Technology |
-|------|------------|
-| Language | Go |
-| Consensus | Custom Raft implementation |
-| Storage | Durable metadata, replicated log, snapshots |
-| Transport | RPC-based node and client communication |
-| Validation | Go tests, fault scripts, history checker |
-| Local Orchestration | Bash scripts, Docker Compose |
-| CI/CD | GitHub Actions |
-| Verification Tooling | Python history checker |
-
----
-
-## Getting Started
-
-### 1. Run tests
+Linux/macOS:
 
 ```bash
 go test ./...
-```
-
-### 2. Start a 5-node cluster
-
-```bash
 ./scripts/start_cluster.sh
-```
-
-This script builds the RaftKV binary, starts five local nodes, waits for leader election, and prints cluster status after the cluster is ready.
-
-### 3. Run the demo workflow
-
-```bash
-./scripts/demo.sh
-```
-
-The demo performs:
-
-- cluster status check
-- write operation
-- read operation
-- multiple writes to trigger snapshotting
-- final replicated state verification
-
-### 4. Stop the cluster
-
-```bash
+./run/raftkv put --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key x --value 42
+./run/raftkv get --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key x
 ./scripts/stop_cluster.sh
 ```
 
----
+Windows PowerShell:
 
-## CLI Usage
-
-Set the node list:
-
-```bash
-NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
+```powershell
+go test ./...
+.\scripts\start_cluster.ps1
+.\run\raftkv.exe put --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key x --value 42
+.\scripts\stop_cluster.ps1
 ```
 
-### Cluster status
-
-```bash
-./run/raftkv status --nodes "$NODES"
-```
-
-### Write a key
-
-```bash
-./run/raftkv put --nodes "$NODES" --key user:1 --value active
-```
-
-### Read a key
-
-```bash
-./run/raftkv get --nodes "$NODES" --key user:1
-```
-
----
-
-## Fault Injection and Verification
-
-RaftKV includes a local chaos workflow that starts a 5-node cluster, writes data, kills the active leader, continues operations through the remaining quorum, and validates the observed history.
-
-```bash
-./scripts/chaos.sh
-```
-
-Sample result:
-
-```text
-killing leader n5
-PASS: checked 9 events; no stale reads after successful writes
-cluster stopped
-```
-
-The history checker verifies that successful reads do not observe stale values after successful writes in the recorded execution order.
-
----
-
-## Snapshotting and Log Compaction
-
-RaftKV supports snapshot-based log compaction after a configurable commit threshold. Once the threshold is reached, the node persists a compacted snapshot of the current key-value state and truncates older log entries.
-
-Example output from the demo:
-
-```text
-snapshot_index: 30
-```
-
-This prevents unbounded log growth during sustained workloads.
-
----
-
-## Benchmarking
-
-Run a local benchmark:
-
-```bash
-./scripts/start_cluster.sh
-
-NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
-./run/raftkv bench --nodes "$NODES" --n 50
-
-./scripts/stop_cluster.sh
-```
-
-Sample local result on WSL:
-
-```text
-writes=50 throughput=34.5_ops/sec p50=29.875ms p99=51.356ms
-```
-
-Benchmark results depend on hardware, operating system, filesystem, and background workload.
-
----
-
-## Docker Compose
-
-Start the cluster with Docker Compose:
+Docker is also supported:
 
 ```bash
 docker compose up --build
 ```
 
-In another terminal:
+The Compose deployment exposes a leader-routing RESP proxy on port 6380. Local scripts expose a direct RESP endpoint on the deterministic initial leader to remove an extra proxy hop from single-host performance measurements.
+
+## Official YCSB benchmark
+
+The PowerShell runner pins [YCSB 0.17.0](https://github.com/brianfrankcooper/YCSB/tree/0.17.0), builds its official Redis binding, and runs workloads A-F without a custom load generator.
+
+```powershell
+.\scripts\start_cluster.ps1
+.\bench\ycsb\run.ps1 -Workload all -RecordCount 100000 -OperationCount 100000 -Threads 16 -FieldCount 1 -FieldLength 100
+.\scripts\stop_cluster.ps1
+```
+
+For the resume gate:
+
+```powershell
+.\bench\ycsb\run.ps1 -Workload c -RecordCount 1000 -OperationCount 100000 -Threads 16 -FieldCount 1 -FieldLength 100
+```
+
+Each run creates a timestamped `benchmark-results/` directory containing:
+
+- hardware, OS, JVM, commit, dirty-tree status, and workload parameters;
+- raw load and run output;
+- YCSB `.hdr` histogram files;
+- per-node HdrHistogram snapshots;
+- SHA-256-linked `summary.json`;
+- `claim-verification.json` with explicit pass/fail results.
+
+The runner fails on YCSB operation errors as well as JVM failures. This avoids a known false-positive mode where a benchmark process exits successfully after worker exceptions.
+
+## Latency measurement
+
+YCSB runs with `measurementtype=hdrhistogram` and `hdrhistogram.fileoutput=true`. RaftKV also records its own complete latency distributions with [hdrhistogram-go](https://github.com/HdrHistogram/hdrhistogram-go); it never averages percentiles across batches.
 
 ```bash
-go build -o run/raftkv ./cmd/raftkv
-
-NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005"
-
-./run/raftkv put --nodes "$NODES" --key x --value 42
-./run/raftkv get --nodes "$NODES" --key x
+curl http://127.0.0.1:9101/metrics
+curl http://127.0.0.1:9101/debug/histograms
+curl -X POST http://127.0.0.1:9101/debug/histograms
 ```
 
----
+## Failure and linearizability verification
 
-## Reliability Checks
+```bash
+./scripts/chaos.sh
+```
 
-RaftKV validates correctness through:
+The workload overlaps reads and writes with a leader crash, records invocation and completion events, and checks the concurrent history with [Porcupine](https://github.com/anishathalye/porcupine). Timed-out calls remain pending because they may have committed; dropping them would make the check unsound.
 
-- unit tests for consensus and storage components
-- 5-node cluster startup verification
-- leader election checks
-- quorum write validation
-- leader crash workflow
-- stale-read history checking
-- CI smoke tests for failure scenarios
+The integration suite also boots a real three-node cluster, commits a value, kills the leader, waits for reelection, and verifies the value through the new leader.
 
----
-
-## Repository Structure
+## Repository map
 
 ```text
-cmd/raftkv/          CLI and server entry point
-internal/raft/       Raft consensus implementation
-internal/rpc/        RPC transport and request handling
-internal/store/      durable metadata, log, and snapshot storage
-scripts/             cluster startup, demo, chaos, and benchmark scripts
-tools/               history checker utilities
-docs/                design and benchmark notes
-.github/workflows/   CI configuration
+cmd/raftkv/            server, client CLI, and RESP proxy
+cmd/chaosload/         concurrent fault workload
+cmd/linearizability/   Porcupine history checker
+internal/raft/         consensus, replication, leases, state machine
+internal/store/        bbolt metadata, WAL, and snapshots
+internal/rpc/          gRPC transport
+internal/resp/         YCSB Redis-binding compatibility layer
+internal/metrics/      HdrHistogram and Prometheus-style metrics
+bench/ycsb/            official YCSB runner and evidence summarizer
+scripts/               five-node and fault-injection harnesses
 ```
 
----
+## Scope
 
-## Current Scope
-
-RaftKV focuses on the core mechanics of consensus and replication. It currently does not include:
-
-- dynamic cluster membership changes
-- proxy-based network partition simulation
-- lease reads or ReadIndex optimization
-- advanced compaction tuning
-- full formal linearizability verification
-- production deployment hardening
-
----
-
-## Roadmap
-
-- Add proxy-based network partition testing
-- Add stronger linearizability verification
-- Add read-index based linearizable reads
-- Improve benchmark throughput through batching
-- Add metrics endpoint for cluster health
-- Add lightweight dashboard for node status and replication state
-
----
-
-## License
-
-MIT License
+This is a focused systems project, not a production replacement for etcd. It does not yet implement dynamic membership, joint consensus, TLS/authentication, cross-region tuning, or automated network partition injection.

@@ -1,0 +1,43 @@
+name: ycsb-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      operations:
+        description: YCSB operation count
+        required: true
+        default: '100000'
+
+jobs:
+  workload-c:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Start five-node cluster
+        shell: pwsh
+        run: .\scripts\start_cluster.ps1
+      - name: Run official YCSB claim profile
+        shell: pwsh
+        run: .\bench\ycsb\run.ps1 -Workload c -RecordCount 1000 -OperationCount ${{ inputs.operations }} -Threads 16 -FieldCount 1 -FieldLength 100
+      - name: Stop cluster
+        if: always()
+        shell: pwsh
+        run: .\scripts\stop_cluster.ps1
+      - name: Upload raw evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raftkv-ycsb-${{ github.sha }}
+          path: benchmark-results/
+          if-no-files-found: error

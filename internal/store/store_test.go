@@ -15,10 +15,13 @@ func TestBoltStorePersistsLogAndSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := []rpc.LogEntry{{Index: 1, Term: 1, Op: "put", Key: "x", Value: "1"}}
-	if err := bs.SaveLog(log); err != nil {
+	if err := bs.AppendLog(log); err != nil {
 		t.Fatal(err)
 	}
-	if err := bs.SaveSnapshot(1, 1, map[string]string{"x": "1"}, nil); err != nil {
+	if err := bs.SaveCommit(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := bs.SaveSnapshot(1, 1, 1, map[string]string{"x": "1"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	bs.Close()
@@ -34,7 +37,7 @@ func TestBoltStorePersistsLogAndSnapshot(t *testing.T) {
 	if ps.CurrentTerm != 3 || ps.VotedFor != "n2" {
 		t.Fatalf("bad meta: %+v", ps)
 	}
-	if ps.SnapshotIndex != 1 || ps.Snapshot["x"] != "1" {
+	if ps.SnapshotIndex != 1 || ps.CommitIndex != 1 || ps.Snapshot["x"] != "1" {
 		t.Fatalf("bad snapshot: %+v", ps)
 	}
 }

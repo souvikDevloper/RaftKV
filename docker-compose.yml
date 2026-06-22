@@ -1,29 +1,39 @@
+x-node: &node
+  build: .
+  restart: unless-stopped
+
 services:
   n1:
-    build: .
-    command: ["server", "--id", "n1", "--listen", "0.0.0.0:7001", "--peers", "n2=n2:7002,n3=n3:7003,n4=n4:7004,n5=n5:7005", "--data", "/data", "--snapshot-every", "10"]
-    ports: ["7001:7001"]
+    <<: *node
+    command: ["server", "--id", "n1", "--listen", "0.0.0.0:7001", "--metrics-listen", "0.0.0.0:9101", "--peers", "n2=n2:7002,n3=n3:7003,n4=n4:7004,n5=n5:7005", "--data", "/data"]
+    ports: ["7001:7001", "9101:9101"]
     volumes: ["n1:/data"]
   n2:
-    build: .
-    command: ["server", "--id", "n2", "--listen", "0.0.0.0:7002", "--peers", "n1=n1:7001,n3=n3:7003,n4=n4:7004,n5=n5:7005", "--data", "/data", "--snapshot-every", "10"]
-    ports: ["7002:7002"]
+    <<: *node
+    command: ["server", "--id", "n2", "--listen", "0.0.0.0:7002", "--metrics-listen", "0.0.0.0:9102", "--peers", "n1=n1:7001,n3=n3:7003,n4=n4:7004,n5=n5:7005", "--data", "/data"]
+    ports: ["7002:7002", "9102:9102"]
     volumes: ["n2:/data"]
   n3:
-    build: .
-    command: ["server", "--id", "n3", "--listen", "0.0.0.0:7003", "--peers", "n1=n1:7001,n2=n2:7002,n4=n4:7004,n5=n5:7005", "--data", "/data", "--snapshot-every", "10"]
-    ports: ["7003:7003"]
+    <<: *node
+    command: ["server", "--id", "n3", "--listen", "0.0.0.0:7003", "--metrics-listen", "0.0.0.0:9103", "--peers", "n1=n1:7001,n2=n2:7002,n4=n4:7004,n5=n5:7005", "--data", "/data"]
+    ports: ["7003:7003", "9103:9103"]
     volumes: ["n3:/data"]
   n4:
-    build: .
-    command: ["server", "--id", "n4", "--listen", "0.0.0.0:7004", "--peers", "n1=n1:7001,n2=n2:7002,n3=n3:7003,n5=n5:7005", "--data", "/data", "--snapshot-every", "10"]
-    ports: ["7004:7004"]
+    <<: *node
+    command: ["server", "--id", "n4", "--listen", "0.0.0.0:7004", "--metrics-listen", "0.0.0.0:9104", "--peers", "n1=n1:7001,n2=n2:7002,n3=n3:7003,n5=n5:7005", "--data", "/data"]
+    ports: ["7004:7004", "9104:9104"]
     volumes: ["n4:/data"]
   n5:
-    build: .
-    command: ["server", "--id", "n5", "--listen", "0.0.0.0:7005", "--peers", "n1=n1:7001,n2=n2:7002,n3=n3:7003,n4=n4:7004", "--data", "/data", "--snapshot-every", "10"]
-    ports: ["7005:7005"]
+    <<: *node
+    command: ["server", "--id", "n5", "--listen", "0.0.0.0:7005", "--metrics-listen", "0.0.0.0:9105", "--peers", "n1=n1:7001,n2=n2:7002,n3=n3:7003,n4=n4:7004", "--data", "/data"]
+    ports: ["7005:7005", "9105:9105"]
     volumes: ["n5:/data"]
+  ycsb-proxy:
+    <<: *node
+    command: ["redis-proxy", "--listen", "0.0.0.0:6380", "--nodes", "n1:7001,n2:7002,n3:7003,n4:7004,n5:7005"]
+    depends_on: [n1, n2, n3, n4, n5]
+    ports: ["6380:6380"]
+
 volumes:
   n1: {}
   n2: {}

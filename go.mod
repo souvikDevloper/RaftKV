@@ -1,12 +1,18 @@
 module github.com/souvikDevloper/RaftKV
 
-go 1.23
+go 1.24
 
 require (
-	go.etcd.io/bbolt v1.3.11
-	google.golang.org/grpc v1.67.1
+	github.com/HdrHistogram/hdrhistogram-go v1.2.0
+	github.com/anishathalye/porcupine v1.2.0
+	go.etcd.io/bbolt v1.4.3
+	google.golang.org/grpc v1.75.1
 )
 
-replace google.golang.org/grpc => ./third_party/minigrpc
-
-replace go.etcd.io/bbolt => ./third_party/minibolt
+require (
+	golang.org/x/net v0.41.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/text v0.26.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
+	google.golang.org/protobuf v1.36.6 // indirect
+)

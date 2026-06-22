@@ -1,4 +1,5 @@
-run/
-data/
-*.db
-.DS_Store
+/.tools/
+/benchmark-results/
+/data/
+/run/
+*.exe

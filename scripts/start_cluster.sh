@@ -19,8 +19,10 @@ rm -f run/*.log
 # Clean old data for repeatable demos; comment this line to test persistence.
 rm -rf data/n{1,2,3,4,5}
 
-SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-10}"
+SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-10000}"
 go build -o run/raftkv ./cmd/raftkv
+go build -o run/chaosload ./cmd/chaosload
+go build -o run/linearizability ./cmd/linearizability
 
 nodes=(127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005)
 for i in 1 2 3 4 5; do
@@ -31,7 +33,9 @@ for i in 1 2 3 4 5; do
       peers+="n$j=127.0.0.1:700$j"
     fi
   done
-  ./run/raftkv server --id "n$i" --listen "127.0.0.1:700$i" --peers "$peers" --data "data/n$i" --snapshot-every "$SNAPSHOT_EVERY" > "run/n$i.log" 2>&1 &
+  resp_args=()
+  [[ "$i" == "1" ]] && resp_args=(--resp-listen 127.0.0.1:6380)
+  ./run/raftkv server --id "n$i" --listen "127.0.0.1:700$i" --metrics-listen "127.0.0.1:910$i" --peers "$peers" --data "data/n$i" --snapshot-every "$SNAPSHOT_EVERY" "${resp_args[@]}" > "run/n$i.log" 2>&1 &
   echo $! > "run/n$i.pid"
 done
 
@@ -42,7 +46,7 @@ NODES="127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:700
 for attempt in $(seq 1 60); do
   out="$(./run/raftkv status --nodes "$NODES" 2>/dev/null || true)"
   if echo "$out" | grep -q '"role":"leader"'; then
-    echo "cluster ready"
+    echo "cluster ready; YCSB endpoint 127.0.0.1:6380"
     echo "$out"
     exit 0
   fi
