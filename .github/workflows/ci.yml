@@ -22,4 +22,4 @@ jobs:
           go-version: '1.24'
       - run: go mod download
       - run: go build -o run/raftkv ./cmd/raftkv
-      - run: RUNS=1 ./scripts/run_fault_suite.sh
+      - run: RUNS=1 bash ./scripts/run_fault_suite.sh

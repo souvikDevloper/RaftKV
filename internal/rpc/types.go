@@ -120,15 +120,18 @@ type QueryResponse struct {
 }
 type StatusRequest struct{}
 type StatusResponse struct {
-	ID            string            `json:"id"`
-	Role          string            `json:"role"`
-	Term          int64             `json:"term"`
-	Leader        string            `json:"leader"`
-	CommitIndex   int64             `json:"commit_index"`
-	LastApplied   int64             `json:"last_applied"`
-	LastLogIndex  int64             `json:"last_log_index"`
-	SnapshotIndex int64             `json:"snapshot_index"`
-	KV            map[string]string `json:"kv,omitempty"`
+	ID            string `json:"id"`
+	Role          string `json:"role"`
+	Term          int64  `json:"term"`
+	Leader        string `json:"leader"`
+	CommitIndex   int64  `json:"commit_index"`
+	LastApplied   int64  `json:"last_applied"`
+	LastLogIndex  int64  `json:"last_log_index"`
+	SnapshotIndex int64  `json:"snapshot_index"`
+	MemberCount   int    `json:"member_count"`
+	Quorum        int    `json:"quorum"`
+	KeyCount      int    `json:"key_count"`
+	Ready         bool   `json:"ready"`
 }
 
 type PeerServer interface {

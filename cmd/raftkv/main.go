@@ -72,7 +72,21 @@ func runServer(args []string) {
 	if err := n.Start(); err != nil {
 		log.Fatal(err)
 	}
-	metricsServer := &http.Server{Addr: *metricsListen, Handler: registry.Handler(), ReadHeaderTimeout: 2 * time.Second}
+	observability := http.NewServeMux()
+	observability.Handle("/", registry.Handler())
+	observability.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	observability.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		status, _ := n.Status(context.Background(), &rpc.StatusRequest{})
+		w.Header().Set("Content-Type", "application/json")
+		if !status.Ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		_ = json.NewEncoder(w).Encode(status)
+	})
+	metricsServer := &http.Server{Addr: *metricsListen, Handler: observability, ReadHeaderTimeout: 2 * time.Second}
 	go func() {
 		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server stopped: %v", err)

@@ -1,100 +1,168 @@
 # RaftKV
 
-RaftKV is a five-node, durable key-value store with a from-scratch Raft consensus implementation in Go. It includes leader election, replicated logs, quorum commits, lease-backed linearizable reads, bbolt persistence, snapshots, a gRPC API, a YCSB-compatible RESP endpoint, HdrHistogram metrics, and Porcupine linearizability checks.
+![Go](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)
+![Consensus](https://img.shields.io/badge/consensus-Raft-4B5563)
+![Benchmark](https://img.shields.io/badge/benchmark-YCSB%200.17.0-2563EB)
+![Latency](https://img.shields.io/badge/read%20p99-1.63ms-16A34A)
+![Throughput](https://img.shields.io/badge/throughput-51.2k%20ops%2Fs-16A34A)
 
-## What is verifiable
+RaftKV is a durable, five-node key-value store built around a from-scratch Raft implementation in Go. It includes leader election, replicated logs, quorum commits, lease-backed linearizable reads, bbolt-backed write-ahead persistence, snapshots, gRPC replication, a RESP endpoint for YCSB, HdrHistogram latency accounting, Prometheus-style metrics, and Porcupine-based linearizability checks.
 
-The repository turns the resume claims into machine-checked gates:
+The project is designed as a systems-engineering artifact: correctness, failure behavior, and performance claims are backed by retained benchmark output rather than ad-hoc scripts.
 
-| Claim | Gate | Evidence |
-|---|---|---|
-| `18,000+ ops/s` | Official YCSB Workload C throughput >= 18,000 ops/s | raw YCSB output + `summary.json` |
-| `sub-3 ms p99 reads` | Workload C READ p99 < 3,000 us | YCSB HdrHistogram output |
-| survives leader failure without data loss | concurrent history remains linearizable after leader termination | Porcupine checker |
+## Highlights
 
-Reference run on 2026-06-21: **67,430.88 ops/s** and **2,789 us READ p99** over 100,000 Workload C operations. Configuration: 16 client threads, 1,000 records, one 100-byte field, local five-node cluster, Windows 11, Intel i5-12450H. Treat this as a reproducible result for that exact configuration, not a universal hardware-independent number.
+- Raft leader election, heartbeats, append entries, commit indexes, and state-machine application.
+- Durable bbolt WAL/snapshot storage for node restart and follower catch-up.
+- Lease-backed linearizable reads with quorum confirmation when the lease expires.
+- gRPC transport for node-to-node replication and client writes.
+- RESP-compatible benchmark endpoint for the official YCSB Redis binding.
+- HdrHistogram-based latency reporting without percentile averaging.
+- Prometheus-style metrics and debug histogram endpoints.
+- Porcupine linearizability checks for fault-injection histories.
+- Reproducible YCSB evidence directories with raw output, histogram files, node stats, manifest data, and pass/fail claim gates.
+
+## Verified performance
+
+Reference run: `benchmark-results/20260622T164348Z`
+
+| Metric | Result |
+|---|---:|
+| Benchmark harness | YCSB 0.17.0 Redis binding |
+| Workload | Workload C, read-only |
+| Cluster | 5 local durable Raft nodes |
+| Records | 1,000 |
+| Operations | 100,000 |
+| Client threads | 8 |
+| Value size | 100 bytes |
+| Throughput | 51,150.90 ops/sec |
+| READ average latency | 144.36 us |
+| READ p95 latency | 352 us |
+| READ p99 latency | 1,627 us / 1.63 ms |
+| Successful reads | 100,000 / 100,000 |
+
+Claim gates retained in `claim-verification.json`:
+
+| Gate | Result |
+|---|---:|
+| Workload C throughput >= 18,000 ops/sec | Passed |
+| Workload C READ p99 < 3,000 us | Passed |
+
+The reference result was measured on a local Windows 11 development profile with an Intel i5-12450H. Treat the number as evidence for that disclosed setup, not as a hardware-independent production SLA.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Y[Official YCSB Redis binding] --> R[RESP benchmark endpoint]
-    G[gRPC clients] --> L[Raft leader]
-    R --> L
-    L -->|AppendEntries| F1[Replica]
-    L -->|AppendEntries| F2[Replica]
-    L -->|AppendEntries| F3[Replica]
-    L -->|AppendEntries| F4[Replica]
-    L --> B1[(bbolt WAL + snapshot)]
-    F1 --> B2[(bbolt)]
-    F2 --> B3[(bbolt)]
-    F3 --> B4[(bbolt)]
-    F4 --> B5[(bbolt)]
+    subgraph Clients
+        C1["gRPC client"]
+        C2["YCSB Redis binding"]
+        C3["raftkv CLI"]
+    end
+
+    C2 --> RESP["RESP benchmark endpoint"]
+    C1 --> Leader["Raft leader"]
+    C3 --> Leader
+    RESP --> Leader
+
+    Leader -->|"AppendEntries"| F1["Follower 1"]
+    Leader -->|"AppendEntries"| F2["Follower 2"]
+    Leader -->|"AppendEntries"| F3["Follower 3"]
+    Leader -->|"AppendEntries"| F4["Follower 4"]
+
+    Leader --> LStore[("bbolt WAL + snapshot")]
+    F1 --> S1[("bbolt WAL + snapshot")]
+    F2 --> S2[("bbolt WAL + snapshot")]
+    F3 --> S3[("bbolt WAL + snapshot")]
+    F4 --> S4[("bbolt WAL + snapshot")]
+
+    Leader --> Metrics["metrics + HdrHistograms"]
 ```
 
-Writes are acknowledged only after durable replication to a majority. Periodic heartbeats reach every follower; write commits may return after a quorum. Reads use a bounded quorum lease and fall back to a quorum confirmation when the lease expires.
+Write path:
 
-## Run locally
+1. A client routes the mutation to the leader.
+2. The leader appends to its local WAL.
+3. Replication is sent to followers through gRPC.
+4. The write is committed after durable majority acknowledgement.
+5. The state machine applies the committed entry and the client receives success.
 
-Go 1.24+ is required.
+Read path:
+
+1. The leader serves reads while a valid bounded quorum lease is active.
+2. If the lease is expired, the leader performs a quorum confirmation before serving the read.
+3. Latencies are recorded into HdrHistogram distributions exposed through debug endpoints and YCSB output.
+
+## Quickstart
+
+Requirements:
+
+- Go 1.24 or newer
+- PowerShell on Windows, or Bash on Linux/macOS
+- Docker, only if using Compose
+
+Windows:
+
+```powershell
+go test ./...
+.\scripts\start_cluster.ps1
+.\run\raftkv.exe put --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key order:1 --value paid
+.\run\raftkv.exe get --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key order:1
+.\scripts\stop_cluster.ps1
+```
 
 Linux/macOS:
 
 ```bash
 go test ./...
 ./scripts/start_cluster.sh
-./run/raftkv put --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key x --value 42
-./run/raftkv get --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key x
+./run/raftkv put --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key order:1 --value paid
+./run/raftkv get --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key order:1
 ./scripts/stop_cluster.sh
 ```
 
-Windows PowerShell:
-
-```powershell
-go test ./...
-.\scripts\start_cluster.ps1
-.\run\raftkv.exe put --nodes 127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005 --key x --value 42
-.\scripts\stop_cluster.ps1
-```
-
-Docker is also supported:
+Docker Compose:
 
 ```bash
 docker compose up --build
 ```
 
-The Compose deployment exposes a leader-routing RESP proxy on port 6380. Local scripts expose a direct RESP endpoint on the deterministic initial leader to remove an extra proxy hop from single-host performance measurements.
+Compose starts a five-node cluster and exposes a leader-routing RESP proxy on port `6380`.
 
-## Official YCSB benchmark
+## Benchmarking with YCSB
 
-The PowerShell runner pins [YCSB 0.17.0](https://github.com/brianfrankcooper/YCSB/tree/0.17.0), builds its official Redis binding, and runs workloads A-F without a custom load generator.
+The benchmark runner uses the official YCSB 0.17.0 Redis binding. It does not use a custom workload generator.
+
+Resume gate profile:
 
 ```powershell
 .\scripts\start_cluster.ps1
-.\bench\ycsb\run.ps1 -Workload all -RecordCount 100000 -OperationCount 100000 -Threads 16 -FieldCount 1 -FieldLength 100
+.\bench\ycsb\run.ps1 -Workload c -RecordCount 1000 -OperationCount 100000 -Threads 8 -FieldCount 1 -FieldLength 100
 .\scripts\stop_cluster.ps1
 ```
 
-For the resume gate:
+Full workload pass:
 
 ```powershell
-.\bench\ycsb\run.ps1 -Workload c -RecordCount 1000 -OperationCount 100000 -Threads 16 -FieldCount 1 -FieldLength 100
+.\bench\ycsb\run.ps1 -Workload all -RecordCount 100000 -OperationCount 100000 -Threads 16 -FieldCount 1 -FieldLength 100
 ```
 
-Each run creates a timestamped `benchmark-results/` directory containing:
+Concurrency sweep:
 
-- hardware, OS, JVM, commit, dirty-tree status, and workload parameters;
-- raw load and run output;
-- YCSB `.hdr` histogram files;
-- per-node HdrHistogram snapshots;
+```powershell
+.\bench\ycsb\sweep.ps1 -ThreadCounts 1,2,4,8,16,32
+```
+
+Each run writes a timestamped `benchmark-results/` directory containing:
+
+- raw YCSB load and run output;
+- YCSB HdrHistogram files;
+- per-node histogram and status snapshots;
+- environment and workload manifest;
 - SHA-256-linked `summary.json`;
-- `claim-verification.json` with explicit pass/fail results.
+- `claim-verification.json` with explicit pass/fail gates.
 
-The runner fails on YCSB operation errors as well as JVM failures. This avoids a known false-positive mode where a benchmark process exits successfully after worker exceptions.
-
-## Latency measurement
-
-YCSB runs with `measurementtype=hdrhistogram` and `hdrhistogram.fileoutput=true`. RaftKV also records its own complete latency distributions with [hdrhistogram-go](https://github.com/HdrHistogram/hdrhistogram-go); it never averages percentiles across batches.
+## Observability
 
 ```bash
 curl http://127.0.0.1:9101/metrics
@@ -102,31 +170,39 @@ curl http://127.0.0.1:9101/debug/histograms
 curl -X POST http://127.0.0.1:9101/debug/histograms
 ```
 
-## Failure and linearizability verification
+The metrics surface includes Raft role/state gauges, request counters, and latency histograms. Histogram snapshots are useful for validating p95/p99 behavior outside the YCSB JVM.
+
+## Correctness and fault testing
 
 ```bash
 ./scripts/chaos.sh
 ```
 
-The workload overlaps reads and writes with a leader crash, records invocation and completion events, and checks the concurrent history with [Porcupine](https://github.com/anishathalye/porcupine). Timed-out calls remain pending because they may have committed; dropping them would make the check unsound.
+The chaos workload overlaps reads and writes with a leader crash, records invocation/completion histories, and verifies the resulting execution with Porcupine. Timed-out operations remain pending because they may have committed; removing them would make the check unsound.
 
-The integration suite also boots a real three-node cluster, commits a value, kills the leader, waits for reelection, and verifies the value through the new leader.
+The integration suite also covers:
 
-## Repository map
+- deterministic quorum-loss rejection;
+- stopped follower snapshot catch-up;
+- leader failover with committed-value preservation;
+- metrics registry behavior;
+- WAL and snapshot persistence.
+
+## Repository layout
 
 ```text
-cmd/raftkv/            server, client CLI, and RESP proxy
+cmd/raftkv/            server process, CLI client, and RESP proxy
 cmd/chaosload/         concurrent fault workload
 cmd/linearizability/   Porcupine history checker
-internal/raft/         consensus, replication, leases, state machine
+internal/raft/         consensus, replication, leases, and state machine
 internal/store/        bbolt metadata, WAL, and snapshots
 internal/rpc/          gRPC transport
 internal/resp/         YCSB Redis-binding compatibility layer
 internal/metrics/      HdrHistogram and Prometheus-style metrics
 bench/ycsb/            official YCSB runner and evidence summarizer
-scripts/               five-node and fault-injection harnesses
+scripts/               local cluster and fault-injection harnesses
 ```
 
 ## Scope
 
-This is a focused systems project, not a production replacement for etcd. It does not yet implement dynamic membership, joint consensus, TLS/authentication, cross-region tuning, or automated network partition injection.
+RaftKV is a focused consensus and storage project. It intentionally does not yet include dynamic membership, joint consensus, TLS, authentication, cross-region tuning, or automated network partition injection. The verified claims are limited to the disclosed local benchmark and retained evidence files.

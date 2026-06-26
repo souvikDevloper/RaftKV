@@ -64,7 +64,7 @@ type proposalResult struct {
 }
 
 type Node struct {
-	mu                sync.Mutex
+	mu                sync.RWMutex
 	readMu            sync.Mutex
 	connMu            sync.Mutex
 	stopOnce          sync.Once
@@ -235,6 +235,7 @@ func (n *Node) AppendEntries(_ context.Context, request *rpc.AppendEntriesReques
 		conflict := min(request.PrevLogIndex, n.lastLogIndexLocked()+1)
 		return &rpc.AppendEntriesResponse{Term: n.currentTerm, MatchIndex: n.lastLogIndexLocked(), ConflictIndex: max(1, conflict)}, nil
 	}
+	oldLastIndex := n.lastLogIndexLocked()
 	changedAt := int64(0)
 	var suffix []rpc.LogEntry
 	for offset, entry := range request.Entries {
@@ -257,7 +258,13 @@ func (n *Node) AppendEntries(_ context.Context, request *rpc.AppendEntriesReques
 			n.logEntries = n.logEntries[:position]
 		}
 		n.logEntries = append(n.logEntries, suffix...)
-		if err := n.storage.ReplaceSuffix(changedAt, suffix); err != nil {
+		var err error
+		if changedAt == oldLastIndex+1 {
+			err = n.storage.AppendLog(suffix)
+		} else {
+			err = n.storage.ReplaceSuffix(changedAt, suffix)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -346,8 +353,8 @@ func (n *Node) Query(ctx context.Context, request *rpc.QueryRequest) (*rpc.Query
 	if err != nil {
 		return &rpc.QueryResponse{Leader: leader, Error: err.Error()}, nil
 	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 	response := &rpc.QueryResponse{Ok: true, Leader: n.cfg.ID, Term: term, Index: index}
 	switch strings.ToLower(request.Op) {
 	case "get":
@@ -357,11 +364,7 @@ func (n *Node) Query(ctx context.Context, request *rpc.QueryRequest) (*rpc.Query
 			response.Values = []string{value}
 		}
 	case "hgetall":
-		values, cached := n.hashValues[request.Key]
-		if !cached {
-			values = flattenHash(decodeStringMap(n.kv[request.Key]))
-			n.hashValues[request.Key] = values
-		}
+		values := flattenHash(decodeStringMap(n.kv[request.Key]))
 		response.Values = append(response.Values, values...)
 		response.Ok = len(values) > 0
 	case "hmget":
@@ -379,17 +382,31 @@ func (n *Node) Query(ctx context.Context, request *rpc.QueryRequest) (*rpc.Query
 }
 
 func (n *Node) Status(_ context.Context, _ *rpc.StatusRequest) (*rpc.StatusResponse, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	n.updateMetricsLocked()
 	return &rpc.StatusResponse{ID: n.cfg.ID, Role: string(n.role), Term: n.currentTerm, Leader: n.leader,
 		CommitIndex: n.commitIndex, LastApplied: n.lastApplied, LastLogIndex: n.lastLogIndexLocked(),
-		SnapshotIndex: n.snapshotIndex, KV: visibleKV(n.kv)}, nil
+		SnapshotIndex: n.snapshotIndex, MemberCount: len(n.cfg.Peers) + 1, Quorum: n.quorumLocked(),
+		KeyCount: len(visibleKV(n.kv)), Ready: n.lastApplied == n.commitIndex}, nil
+}
+
+func (n *Node) updateMetricsLocked() {
+	role := map[Role]float64{Follower: 0, Candidate: 1, Leader: 2}[n.role]
+	n.cfg.Metrics.SetGauge("raft_role", role)
+	n.cfg.Metrics.SetGauge("current_term", float64(n.currentTerm))
+	n.cfg.Metrics.SetGauge("commit_index", float64(n.commitIndex))
+	n.cfg.Metrics.SetGauge("last_applied", float64(n.lastApplied))
+	n.cfg.Metrics.SetGauge("apply_lag", float64(max(0, n.commitIndex-n.lastApplied)))
+	n.cfg.Metrics.SetGauge("snapshot_index", float64(n.snapshotIndex))
+	n.cfg.Metrics.SetGauge("member_count", float64(len(n.cfg.Peers)+1))
+	n.cfg.Metrics.SetGauge("quorum_size", float64(n.quorumLocked()))
 }
 
 func (n *Node) submit(ctx context.Context, op, key, value string) (proposalResult, string, error) {
-	n.mu.Lock()
+	n.mu.RLock()
 	term, role, leader := n.currentTerm, n.role, n.leader
-	n.mu.Unlock()
+	n.mu.RUnlock()
 	if role != Leader {
 		return proposalResult{}, leader, ErrNotLeader
 	}
@@ -590,12 +607,14 @@ func (n *Node) replicateTo(ctx context.Context, id, address string, target int64
 		}
 		previous := next - 1
 		previousTerm, _ := n.termAtLocked(previous)
-		entries := make([]rpc.LogEntry, 0)
-		for _, entry := range n.logEntries {
-			if entry.Index >= next {
-				entries = append(entries, entry)
-			}
+		start := int(next - n.snapshotIndex - 1)
+		if start < 0 {
+			start = 0
 		}
+		if start > len(n.logEntries) {
+			start = len(n.logEntries)
+		}
+		entries := append([]rpc.LogEntry(nil), n.logEntries[start:]...)
 		term, commit := n.currentTerm, n.commitIndex
 		n.mu.Unlock()
 		client, err := n.peerClient(ctx, id, address)
@@ -775,9 +794,9 @@ func (n *Node) heartbeatLoop() {
 		case <-n.stopped:
 			return
 		case <-ticker.C:
-			n.mu.Lock()
+			n.mu.RLock()
 			leader, target := n.role == Leader, n.commitIndex
-			n.mu.Unlock()
+			n.mu.RUnlock()
 			if !leader {
 				continue
 			}
@@ -796,34 +815,34 @@ func (n *Node) heartbeatLoop() {
 }
 
 func (n *Node) confirmLeadership(ctx context.Context) (term, index int64, leader string, err error) {
-	n.mu.Lock()
+	n.mu.RLock()
 	term, index, leader = n.currentTerm, n.commitIndex, n.leader
 	if n.role != Leader {
-		n.mu.Unlock()
+		n.mu.RUnlock()
 		return term, index, leader, ErrNotLeader
 	}
 	if n.leaderReadyTerm != term {
-		n.mu.Unlock()
+		n.mu.RUnlock()
 		return term, index, leader, ErrLeaderNotReady
 	}
 	if time.Since(n.lastQuorumContact) < n.cfg.ReadLease {
-		n.mu.Unlock()
+		n.mu.RUnlock()
 		return term, index, n.cfg.ID, nil
 	}
-	n.mu.Unlock()
+	n.mu.RUnlock()
 	n.readMu.Lock()
 	defer n.readMu.Unlock()
-	n.mu.Lock()
+	n.mu.RLock()
 	term, index, leader = n.currentTerm, n.commitIndex, n.leader
 	if n.role != Leader || n.leaderReadyTerm != term {
-		n.mu.Unlock()
+		n.mu.RUnlock()
 		return term, index, leader, ErrNotLeader
 	}
 	if time.Since(n.lastQuorumContact) < n.cfg.ReadLease {
-		n.mu.Unlock()
+		n.mu.RUnlock()
 		return term, index, n.cfg.ID, nil
 	}
-	n.mu.Unlock()
+	n.mu.RUnlock()
 	checkCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
 	if n.replicateQuorum(checkCtx, index) < n.quorum() {
